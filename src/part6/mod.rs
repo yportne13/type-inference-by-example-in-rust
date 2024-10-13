@@ -88,7 +88,7 @@ impl Inference {
         environment: HashMap<String, Type>,
         expected_type: Type,
         expression: Expression,
-    ) -> Expression {
+    ) -> Result<Expression, String> {
         match expression {
             Expression::Lambda(parameters, return_type, body) => {
                 let param_len = parameters.len();
@@ -113,7 +113,7 @@ impl Inference {
                             .map(|p| (p.name.clone(), p.type_annotation.clone().unwrap())),
                     )
                     .collect();
-                let new_body = self.infer(new_environment, new_return_type.clone(), *body);
+                let new_body = self.infer(new_environment, new_return_type.clone(), *body)?;
                 self.type_constraints.push(Constraint::CEquality(
                     expected_type,
                     Type::Constructor(
@@ -121,7 +121,7 @@ impl Inference {
                         new_parameter_types.into_iter().chain(vec![new_return_type.clone()]).collect(),
                     ),
                 ));
-                Expression::Lambda(new_parameters, Some(new_return_type), Box::new(new_body))
+                Ok(Expression::Lambda(new_parameters, Some(new_return_type), Box::new(new_body)))
             }
             Expression::Apply(function, arguments) => {
                 let argument_types: Vec<Type> = arguments.iter().map(|_| self.fresh_type_variable()).collect();
@@ -129,50 +129,50 @@ impl Inference {
                     format!("Function{}", arguments.len()),
                     argument_types.clone().into_iter().chain(vec![expected_type]).collect(),
                 );
-                let new_function = self.infer(environment.clone(), function_type, *function);
+                let new_function = self.infer(environment.clone(), function_type, *function)?;
                 let new_arguments: Vec<Expression> = arguments
                     .into_iter()
                     .zip(argument_types)
                     .map(|(argument, t)| self.infer(environment.clone(), t, argument))
-                    .collect();
-                Expression::Apply(Box::new(new_function), new_arguments)
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Expression::Apply(Box::new(new_function), new_arguments))
             }
             Expression::Variable(name) => {
-                let variable_type = environment.get(&name).cloned().unwrap_or_else(|| {
-                    panic!("Variable not in scope: {}", name)
-                });
+                let variable_type = environment.get(&name).cloned().ok_or({
+                    format!("Variable not in scope: {}", name)
+                })?;
                 self.type_constraints.push(Constraint::CEquality(expected_type, variable_type.clone()));
-                Expression::Variable(name)
+                Ok(Expression::Variable(name))
             }
             Expression::Let(name, type_annotation, value, body) => {
                 let new_type_annotation = type_annotation.unwrap_or_else(|| self.fresh_type_variable());
-                let new_value = self.infer(environment.clone(), new_type_annotation.clone(), *value);
+                let new_value = self.infer(environment.clone(), new_type_annotation.clone(), *value)?;
                 let new_environment = environment
                     .into_iter()
                     .chain(vec![(name.clone(), new_type_annotation.clone())])
                     .collect();
-                let new_body = self.infer(new_environment, expected_type, *body);
-                Expression::Let(name, Some(new_type_annotation), Box::new(new_value), Box::new(new_body))
+                let new_body = self.infer(new_environment, expected_type, *body)?;
+                Ok(Expression::Let(name, Some(new_type_annotation), Box::new(new_value), Box::new(new_body)))
             }
             Expression::Int(_) => {
                 self.type_constraints.push(Constraint::CEquality(expected_type, Type::Constructor("Int".to_string(), vec![])));
-                expression
+                Ok(expression)
             }
             Expression::String(_) => {
                 self.type_constraints.push(Constraint::CEquality(expected_type, Type::Constructor("String".to_string(), vec![])));
-                expression
+                Ok(expression)
             }
             Expression::Array(item_type, items) => {
                 let new_item_type = item_type.unwrap_or_else(|| self.fresh_type_variable());
                 let new_items: Vec<Expression> = items
                     .into_iter()
                     .map(|item| self.infer(environment.clone(), new_item_type.clone(), item))
-                    .collect();
+                    .collect::<Result<Vec<_>, String>>()?;
                 self.type_constraints.push(Constraint::CEquality(
                     expected_type,
                     Type::Constructor("Array".to_string(), vec![new_item_type.clone()]),
                 ));
-                Expression::Array(Some(new_item_type), new_items)
+                Ok(Expression::Array(Some(new_item_type), new_items))
             }
         }
     }
@@ -186,40 +186,41 @@ impl Inference {
         }
     }
 
-    pub fn unify(&mut self, t1: Type, t2: Type) {
+    pub fn unify(&mut self, t1: Type, t2: Type) -> Result<(), String> {
         match (t1, t2) {
             (Type::Variable(i1), Type::Variable(i2)) if i1 == i2 => {}
             (Type::Variable(i), t2) if self.substitution[i] != Type::Variable(i) => {
-                self.unify(self.substitution[i].clone(), t2);
+                self.unify(self.substitution[i].clone(), t2)?
             }
             (t1, Type::Variable(i)) if self.substitution[i] != Type::Variable(i) => {
-                self.unify(t1, self.substitution[i].clone());
+                self.unify(t1, self.substitution[i].clone())?
             }
             (Type::Variable(i), t2) => {
                 if self.occurs_in(i, &t2) {
-                    panic!("Infinite type: ${} = {:?}", i, self.substitute(&t2));
+                    return Err(format!("Infinite type: ${} = {:?}", i, self.substitute(&t2)));
                 }
                 self.substitution[i] = t2;
             }
             (t1, Type::Variable(i)) => {
                 if self.occurs_in(i, &t1) {
-                    panic!("Infinite type: ${} = {:?}", i, self.substitute(&t1));
+                    return Err(format!("Infinite type: ${} = {:?}", i, self.substitute(&t1)));
                 }
                 self.substitution[i] = t1;
             }
             (Type::Constructor(name1, generics1), Type::Constructor(name2, generics2)) => {
                 if name1 != name2 || generics1.len() != generics2.len() {
-                    panic!(
+                    return Err(format!(
                         "Type mismatch: {:?} vs. {:?}",
                         self.substitute(&Type::Constructor(name1, generics1)),
                         self.substitute(&Type::Constructor(name2, generics2))
-                    );
+                    ));
                 }
                 for (t1, t2) in generics1.into_iter().zip(generics2) {
-                    self.unify(t1, t2);
+                    self.unify(t1, t2)?
                 }
             }
         }
+        Ok(())
     }
 
     pub fn occurs_in(&self, index: usize, t: &Type) -> bool {
@@ -310,18 +311,17 @@ fn initial_environment() -> HashMap<String, Type> {
     .collect()
 }
 
-fn infer(expression: Expression) -> Expression {
+fn infer(expression: Expression) -> Result<Expression, String> {
     let mut inference = Inference::new();
     let expect = inference.fresh_type_variable();
-    let new_expression = inference.infer(HashMap::new(), expect, expression);
+    let new_expression = inference.infer(HashMap::new(), expect, expression)?;
     inference.solve_constraints();
-    inference.substitute_expression(new_expression)
+    Ok(inference.substitute_expression(new_expression))
 }
 
-fn print_infer(expression: Expression) -> String {
-    match infer(expression) {
-        e => format!("{:?}", e),
-    }
+pub fn print_infer(expression: Expression) -> String {
+    let e = infer(expression);
+    format!("{:?}", e)
 }
 
 #[test]

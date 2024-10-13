@@ -26,7 +26,7 @@ pub enum Constraint {
 // Type inference
 /////////////////////////////////
 
-#[derive(Debug)]
+/*#[derive(Debug)]
 pub struct TypeError {
     message: String,
 }
@@ -37,7 +37,7 @@ impl std::fmt::Display for TypeError {
     }
 }
 
-impl std::error::Error for TypeError {}
+impl std::error::Error for TypeError {}*/
 
 pub struct Inference {
     type_constraints: Vec<Constraint>,
@@ -62,68 +62,72 @@ impl Inference {
         &mut self,
         expression: &Expression,
         environment: &HashMap<String, Type>,
-    ) -> Type {
+    ) -> Result<Type, String> {
         match expression {
             Expression::Lambda(x, e) => {
                 let t1 = self.fresh_type_variable();
                 let mut environment2 = environment.clone();
                 environment2.insert(x.clone(), t1.clone());
-                let t2 = self.infer_type(e, &environment2);
-                Type::Constructor("Function1".to_string(), vec![t1, t2])
+                let t2 = self.infer_type(e, &environment2)?;
+                Ok(Type::Constructor("Function1".to_string(), vec![t1, t2]))
             }
             Expression::Apply(e1, e2) => {
-                let t1 = self.infer_type(e1, environment);
-                let t2 = self.infer_type(e2, environment);
+                let t1 = self.infer_type(e1, environment)?;
+                let t2 = self.infer_type(e2, environment)?;
                 let t3 = self.fresh_type_variable();
                 self.type_constraints
                     .push(Constraint::Equality(t1, Type::Constructor("Function1".to_string(), vec![t2, t3.clone()])));
-                t3
+                Ok(t3)
             }
-            Expression::Variable(x) => environment.get(x).cloned().unwrap_or_else(|| {
-                panic!("Variable not in scope: {}", x)
-            }),
+            Expression::Variable(x) => environment.get(x).cloned().ok_or(
+                format!("Variable not in scope: {}", x)
+            ),
         }
     }
 
-    fn solve_constraints(&mut self) {
+    fn solve_constraints(&mut self) -> Result<(), String> {
         let constraint = self.type_constraints.drain(..).collect::<Vec<_>>();
         for constraint in constraint {
             if let Constraint::Equality(t1, t2) = constraint {
-                self.unify(t1, t2);
+                self.unify(t1, t2)?;
             }
         }
+        Ok(())
     }
 
-    fn unify(&mut self, t1: Type, t2: Type) {
+    fn unify(&mut self, t1: Type, t2: Type) -> Result<(), String> {
         match (t1, t2) {
             (Type::Variable(i), t2) if self.substitution[i] != Type::Variable(i) => {
-                self.unify(self.substitution[i].clone(), t2);
+                self.unify(self.substitution[i].clone(), t2)
             }
             (t1, Type::Variable(i)) if self.substitution[i] != Type::Variable(i) => {
-                self.unify(t1, self.substitution[i].clone());
+                self.unify(t1, self.substitution[i].clone())
             }
             (Type::Variable(i), t2) => {
                 if self.occurs_in(i, &t2) {
-                    panic!("Infinite type: ${} = {:?}", i, t2);
+                    return Err(format!("Infinite type: ${} = {:?}", i, t2));
                 }
                 self.substitution[i] = t2;
+                Ok(())
             }
             (t1, Type::Variable(i)) => {
                 if self.occurs_in(i, &t1) {
-                    panic!("Infinite type: ${} = {:?}", i, t1);
+                    return Err(format!("Infinite type: ${} = {:?}", i, t1));
                 }
                 self.substitution[i] = t1;
+                Ok(())
             }
             (Type::Constructor(name1, generics1), Type::Constructor(name2, generics2)) if name1 == name2 => {
                 if generics1.len() != generics2.len() {
-                    panic!("Generics mismatch: {:?} vs. {:?}", generics1, generics2);
+                    return Err(format!("Generics mismatch: {:?} vs. {:?}", generics1, generics2));
                 }
                 for (t1, t2) in generics1.iter().zip(generics2.iter()) {
-                    self.unify(t1.clone(), t2.clone());
+                    self.unify(t1.clone(), t2.clone())?;
                 }
+                Ok(())
             }
             (t1, t2) => {
-                panic!("Type mismatch: {:?} vs. {:?}", t1, t2);
+                Err(format!("Type mismatch: {:?} vs. {:?}", t1, t2))
             }
         }
     }
@@ -181,17 +185,17 @@ fn initial_environment() -> HashMap<String, Type> {
     env
 }
 
-fn infer(expression: Expression) -> Result<Type, TypeError> {
+fn infer(expression: Expression) -> Result<Type, String> {
     let mut inference = Inference::new();
-    let t = inference.infer_type(&expression, &initial_environment());
-    inference.solve_constraints();
+    let t = inference.infer_type(&expression, &initial_environment())?;
+    inference.solve_constraints()?;
     Ok(inference.substitute(&t))
 }
 
-fn print_infer(expression: Expression) -> String {
+pub fn print_infer(expression: Expression) -> String {
     match infer(expression) {
         Ok(t) => format!("{:?}", t),
-        Err(e) => e.message,
+        Err(e) => e,
     }
 }
 
